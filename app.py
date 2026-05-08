@@ -131,6 +131,7 @@ if uploaded_file is not None:
     st.image(contour_img, caption=f"All Contours Found: {len(contours)}", width='stretch')
 
     # Step 3: manually finding plate location
+    st.subheader("Plate Segmentation")
     img_area = img.shape[0] * img.shape[1]
     plate_candidates = []
     for cont in contours:
@@ -151,7 +152,7 @@ if uploaded_file is not None:
         st.image(plate_img, caption="Filtered Plate Detection")
 
     # Step 4: Read plate location from xml
-    st.subheader("Plate Segmentation")
+    
 
     def get_plate_coords(image_name):
         xml_name = image_name.replace('.png', '.xml').replace('.jpg', '.xml')
