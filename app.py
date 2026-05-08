@@ -3,6 +3,15 @@ from PIL import Image
 import os
 import cv2
 import numpy as np
+import xml.etree.ElementTree as ET
+import onnxruntime as ort
+
+try:
+    ort_session = ort.InferenceSession("model.onnx")
+except Exception as e:
+    st.error(f"Could not load model.onnx: {e}")
+
+label_map = list("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 # =========================
 # Page Title
@@ -42,7 +51,7 @@ if uploaded_file is not None:
     # Original Image
     # =========================
     st.subheader("Original Image")
-    st.image(img_rgb, use_container_width=True)
+    st.image(img_rgb, width='stretch')
 
     # =========================
     # GrayScale
@@ -77,6 +86,20 @@ if uploaded_file is not None:
 
     st.subheader("Histogram Equalization")
     st.image(equalized, channels="GRAY")
+    # =========================
+    # Before vs After
+    # =========================
+    st.subheader("Before vs After Enhancement")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("Before")
+        st.image(gray, channels="GRAY")
+
+    with col2:
+        st.markdown("After")
+        st.image(equalized, channels="GRAY")
 
     # =========================
     # Thresholding
@@ -92,72 +115,111 @@ if uploaded_file is not None:
     st.image(thresh, channels="GRAY")
 
 
-#Edge Detection and Plate Segmentation
 
-import xml.etree.ElementTree as ET
+    # Edge Detection and Plate Segmentation
+    st.subheader("Edge Detection(Canny)")
 
-st.subheader("Edge Detection(Canny)")
+    # Step 1: Canny Edge Detection
+    edges = cv2.Canny(equalized, 100, 200)
+    st.image(edges, channels="GRAY", caption="Canny Edges")
 
-# Step 1: Canny Edge Detection
-edges = cv2.Canny(equalized, 100, 200)
-st.image(edges, channels="GRAY", caption="Canny Edges")
+    # Step 2: Find and draw all contours
+    st.subheader("Contour Detection")
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contour_img = img_rgb.copy()
+    cv2.drawContours(contour_img, contours, -1, (255, 0, 0), 1)
+    st.image(contour_img, caption=f"All Contours Found: {len(contours)}", width='stretch')
 
-#Step 2: Find and draw all contours
-st.subheader("Contour Detection")
-contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-contour_img = img_rgb.copy()
-cv2.drawContours(contour_img, contours, -1, (255, 0, 0), 1)
-st.image(contour_img, caption=f"All Contours Found: {len(contours)}", use_container_width=True)
+    # Step 3: manually finding plate location
+    img_area = img.shape[0] * img.shape[1]
+    plate_candidates = []
+    for cont in contours:
+        perimeter = cv2.arcLength(cont,True)
+        approx = cv2.approxPolyDP(cont,0.01*perimeter,True)
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            aspect_ratio = w / float(h)
+            area = w * h
+            if (2.0 < aspect_ratio < 5.5) and (0.01 * img_area < area < 0.20 * img_area):
+                plate_candidates.append(approx)
 
-# Step3: Read plate location from xml
-st.subheader("Plate Segmentation")
+    
+    if plate_candidates:
+        best_plate = min(plate_candidates, key=lambda x: abs((cv2.boundingRect(x)[2]/cv2.boundingRect(x)[3]) - 3.5))
+        x, y, w, h = cv2.boundingRect(best_plate)
+        plate_img = img_rgb[y:y+h, x:x+w]
+        st.image(plate_img, caption="Filtered Plate Detection")
 
-def get_plate_coords(image_name):
-    xml_name = image_name.replace('.png', '.xml').replace('.jpg', '.xml')
-    xml_path = f"Dataset/annotations/{xml_name}"
-    if not os.path.exists(xml_path):
-        return None
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-    bndbox = root.find('.//bndbox')
-    xmin = int(bndbox.find('xmin').text)
-    ymin = int(bndbox.find('ymin').text)
-    xmax = int(bndbox.find('xmax').text)
-    ymax = int(bndbox.find('ymax').text)
-    return xmin, ymin, xmax, ymax
+    # Step 4: Read plate location from xml
+    st.subheader("Plate Segmentation")
 
-# Step4: Drawing the box & cropping the  plate
-coords = get_plate_coords(uploaded_file.name)
-img_copy = img_rgb.copy()
+    def get_plate_coords(image_name):
+        xml_name = image_name.replace('.png', '.xml').replace('.jpg', '.xml')
+        xml_path = f"Dataset/annotations/{xml_name}"
+        if not os.path.exists(xml_path):
+            return None
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        bndbox = root.find('.//bndbox')
+        xmin = int(bndbox.find('xmin').text)
+        ymin = int(bndbox.find('ymin').text)
+        xmax = int(bndbox.find('xmax').text)
+        ymax = int(bndbox.find('ymax').text)
+        return xmin, ymin, xmax, ymax
 
-if coords:
-    xmin, ymin, xmax, ymax = coords
-    cv2.rectangle(img_copy, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-    plate_img = img_rgb[ymin:ymax, xmin:xmax]
-    st.image(img_copy, caption="Detected Plate Location", use_container_width=True)
-    st.subheader("Cropped Plate Region")
-    st.image(plate_img, caption="Extracted Plate", use_container_width=True)
-    st.success("Plate Successfully Segmented")
-else:
-    st.warning("No annotation found ")
+    # Step 5: Drawing the box & cropping the plate
+    coords = get_plate_coords(uploaded_file.name)
+    img_copy = img_rgb.copy()
 
+    if coords:
+        xmin, ymin, xmax, ymax = coords
+        cv2.rectangle(img_copy, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+        plate_img = img_rgb[ymin:ymax, xmin:xmax]
+        st.image(img_copy, caption="Detected Plate Location", width='stretch')
+        st.subheader("Cropped Plate Region")
+        st.image(plate_img, caption="Extracted Plate", width='stretch')
+        st.success("Plate Successfully Segmented")
+    else:
+        st.warning("No annotation found ")
+    gray_plate = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+    ret, thresh_plate = cv2.threshold(gray_plate, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # finding characters
+    st.subheader("Threshold Image")
+    st.image(thresh_plate, channels="GRAY")
+    contours_plate, _ = cv2.findContours(thresh_plate, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contour_img = plate_img.copy()
+    cv2.drawContours(contour_img, contours_plate, -1, (255, 0, 0), 1)
+    st.image(contour_img)
 
+    # filter
+    plate_height, plate_width = plate_img.shape[:2]
+    chars = []
+    for cnt in contours_plate:
+        x, y, w, h = cv2.boundingRect(cnt)
+        area = w * h
+        if 0.6 < h / plate_height < 0.9 and w / plate_width < 0.3:
+            chars.append((x, y, w, h))
+    chars = sorted(chars, key=lambda x: x[0])
+    for x, y, w, h in chars:
+        cv2.rectangle(plate_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        st.image(plate_img[y:y+h, x:x+w])
+    st.image(plate_img, caption="Characters")
+    
+    text = ""
+    for char in chars:
+        x, y, w, h = char
+        char_crop = thresh_plate[y:y+h, x:x+w]
+        char_resized = cv2.resize(char_crop, (32, 32))
+        char_normalized = char_resized.astype(np.float32) / 255.0
+        char_input = char_normalized.reshape(1, 32, 32, 1)
+        ort_inputs = {ort_session.get_inputs()[0].name: char_input}
+        ort_outs = ort_session.run(None, ort_inputs)
+        pred_idx = np.argmax(ort_outs[0])
+        text += label_map[pred_idx]
 
-
-    # =========================
-    # Before vs After
-    # =========================
-    st.subheader("Before vs After Enhancement")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("Before")
-        st.image(gray, channels="GRAY")
-
-    with col2:
-        st.markdown("After")
-        st.image(equalized, channels="GRAY")
+    st.subheader("Plate Text (OCR Result)")
+    st.success(f"Detected Plate: {text}")
 
 
 
@@ -186,7 +248,7 @@ if os.path.exists(dataset_path):
             cols[i].image(
                 img,
                 caption=file,
-                use_container_width=True
+                width='stretch'
             )
 
     else:
